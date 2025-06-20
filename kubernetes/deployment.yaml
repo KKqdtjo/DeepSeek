@@ -1,0 +1,431 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseek-master
+  namespace: default
+  labels:
+    app: deepseek
+    component: master
+    version: v1.0.0
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deepseek
+      component: master
+  template:
+    metadata:
+      labels:
+        app: deepseek
+        component: master
+        version: v1.0.0
+    spec:
+      nodeSelector:
+        node-role: master
+      containers:
+      - name: deepseek-api
+        image: deepseek-api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: api
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: NODE_TYPE
+          value: "master"
+        - name: NODE_ROLE
+          value: "coordinator"
+        - name: CLUSTER_ENABLED
+          value: "true"
+        - name: MODEL_PATH
+          value: "/data/models/deepseek-coder-6.7b-instruct"
+        - name: TENSOR_PARALLEL_SIZE
+          value: "1"
+        - name: GPU_MEMORY_UTILIZATION
+          value: "0.85"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "4"
+            memory: "8Gi"
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /data/models
+        - name: cache-storage
+          mountPath: /data/cache
+        - name: log-storage
+          mountPath: /data/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: deepseek-models-pvc
+      - name: cache-storage
+        emptyDir:
+          sizeLimit: 10Gi
+      - name: log-storage
+        emptyDir:
+          sizeLimit: 5Gi
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseek-worker
+  namespace: default
+  labels:
+    app: deepseek
+    component: worker
+    version: v1.0.0
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: deepseek
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: deepseek
+        component: worker
+        version: v1.0.0
+    spec:
+      nodeSelector:
+        node-role: worker
+      containers:
+      - name: deepseek-api
+        image: deepseek-api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: api
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: NODE_TYPE
+          value: "worker"
+        - name: NODE_ROLE
+          value: "inference"
+        - name: CLUSTER_ENABLED
+          value: "true"
+        - name: MASTER_NODE
+          value: "deepseek-master-service:8000"
+        - name: MODEL_PATH
+          value: "/data/models/deepseek-coder-6.7b-instruct"
+        - name: TENSOR_PARALLEL_SIZE
+          value: "1"
+        - name: GPU_MEMORY_UTILIZATION
+          value: "0.85"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /data/models
+          readOnly: true
+        - name: cache-storage
+          mountPath: /data/cache
+        - name: log-storage
+          mountPath: /data/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: deepseek-models-pvc
+      - name: cache-storage
+        emptyDir:
+          sizeLimit: 5Gi
+      - name: log-storage
+        emptyDir:
+          sizeLimit: 2Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-master-service
+  namespace: default
+  labels:
+    app: deepseek
+    component: master
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: api
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: metrics
+  selector:
+    app: deepseek
+    component: master
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-worker-service
+  namespace: default
+  labels:
+    app: deepseek
+    component: worker
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: api
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: metrics
+  selector:
+    app: deepseek
+    component: worker
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-api-service
+  namespace: default
+  labels:
+    app: deepseek
+  annotations:
+    service.beta.kubernetes.io/huaweicloud-load-balancer-class: "union"
+    service.beta.kubernetes.io/huaweicloud-load-balancer-type: "public"
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  - port: 443
+    targetPort: 8000
+    protocol: TCP
+    name: https
+  selector:
+    app: deepseek
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: deepseek-models-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: csi-obs
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-config
+  namespace: default
+data:
+  config.yaml: |
+    # DeepSeek配置文件
+    app:
+      name: deepseek-api
+      version: 1.0.0
+      debug: false
+    
+    model:
+      name: deepseek-coder
+      path: /data/models/deepseek-coder-6.7b-instruct
+      dtype: auto
+      max_model_len: 4096
+    
+    vllm:
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.85
+      max_num_seqs: 256
+      max_num_batched_tokens: 8192
+    
+    cluster:
+      enabled: true
+      discovery_method: kubernetes
+      heartbeat_interval: 30
+    
+    monitoring:
+      metrics_enabled: true
+      metrics_port: 9090
+    
+    logging:
+      level: INFO
+      format: json
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: deepseek-secrets
+  namespace: default
+type: Opaque
+data:
+  hw-access-key: ""  # Base64编码的华为云访问密钥
+  hw-secret-key: ""  # Base64编码的华为云私有密钥
+  api-key: ""        # Base64编码的API密钥
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: deepseek-ingress
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  tls:
+  - hosts:
+    - deepseek-api.example.com
+    secretName: deepseek-tls-secret
+  rules:
+  - host: deepseek-api.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: deepseek-api-service
+            port:
+              number: 80
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: deepseek-pdb
+  namespace: default
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: deepseek
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: deepseek-worker-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: deepseek-worker
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60 
